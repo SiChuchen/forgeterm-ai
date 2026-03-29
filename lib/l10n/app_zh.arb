@@ -1,0 +1,22 @@
+{
+  "@@locale": "zh",
+  "appTitle": "ForgeTerm AI",
+  "serverList": "服务器列表",
+  "addServer": "添加服务器",
+  "editServer": "编辑服务器",
+  "deleteServer": "删除服务器",
+  "deleteConfirm": "确定要删除此服务器吗？",
+  "noServers": "暂无服务器，点击添加",
+  "settings": "设置",
+  "terminal": "终端",
+  "connect": "连接",
+  "disconnect": "断开",
+  "reconnect": "重新连接",
+  "connectionError": "连接错误",
+  "disconnected": "连接已断开",
+  "cancel": "取消",
+  "confirm": "确认",
+  "save": "保存",
+  "delete": "删除",
+  "edit": "编辑"
+}

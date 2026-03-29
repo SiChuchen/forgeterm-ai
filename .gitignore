@@ -1,0 +1,82 @@
+# Flutter
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+
+# Android
+android/.gradle/
+android/app/debug/
+android/app/profile/
+android/app/release/
+android/local.properties
+android/key.properties
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Spike/PoC 临时文件
+spike/
+
+# 生成文件
+# 统一纳入版本控制，避免本地与 CI 的 codegen 结果漂移
+
+# 环境
+.env
+
+# Playwright MCP 临时文件
+.playwright-mcp/
+
+# Claude 本地设置
+.claude/settings.local.json
+.claude/CHECKPOINT_*.txt
+
+# CCG/本地流程临时文件
+.ccg/tmp/
+.gemini/
+build_and_install_log.txt
+/fix*.dart
+/patch*.dart
+/patch*.py
+
+# 本地专用 / 内部资料
+/.claude/
+/.ccg/
+/CLAUDE.md
+/server.md
+/PRD.md
+/docs/CLAUDE.md
+/docs/2026-03-25-bugfix-record.md
+/docs/AI-CLI-Commands-Test-Report.md
+/docs/Sprint规划.md
+/docs/交互流程图.md
+/docs/里程碑验收标准.md
+/docs/deep-research-report.md
+/docs/mosh-feasibility.md
+/docs/ssh-stdio-gateway-auto-deploy-plan.md
+/docs/v1.0-性能验收报告.md
+/docs/v1.2-ai-native-api-plan.md
+/docs/优化版执行计划.md
+/docs/开发环境配置.md
+/test/测试计划.md
+/openspec/
+/design/
+/design/CLAUDE.md
+/design/Gemini*.md
+/design/v3.0_Theme_Development_Plan.md
+/design/v3.0_Theme_Execution_Checklist.md
+/design/前端重构计划_v2.0.md
+
+# Android 本地构建临时目录
+android/.kotlin/
+
+else/
