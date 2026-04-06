@@ -17,6 +17,23 @@ class OpenCodeDetector {
   static const String adapterId = 'opencode';
   static const String displayName = 'OpenCode';
   static const IconData icon = Icons.code;
+  static const AIToolCapabilities _httpCapabilities = AIToolCapabilities(
+    supportsMessageHistory: true,
+    supportsAbort: true,
+    supportsInputFiles: true,
+    supportsInputImages: true,
+    supportsModelSelection: true,
+    supportsAgentSelection: true,
+    supportsVariantSelection: true,
+    supportsCommandMode: true,
+      supportsShellMode: true,
+      supportsMcp: true,
+      supportsPermissionRequests: true,
+      supportsProviderCatalog: true,
+      supportsShare: true,
+      supportsSummarize: true,
+    );
+  static const AIToolCapabilities _fallbackCapabilities = AIToolCapabilities();
 
   /// 检测 OpenCode 是否已安装及其支持模式。
   static Future<ToolDetectionResult> detect(
@@ -48,6 +65,7 @@ class OpenCodeDetector {
           isInstalled: true,
           supportedModes: ['http', 'pty'],
           preferredMode: 'http',
+          capabilities: _httpCapabilities,
         );
       }
 
@@ -56,6 +74,7 @@ class OpenCodeDetector {
         isInstalled: true,
         supportedModes: ['pty'],
         preferredMode: 'pty',
+        capabilities: _fallbackCapabilities,
       );
     } catch (error) {
       AppLogger.error('OpenCodeDetector: 检测失败', error);

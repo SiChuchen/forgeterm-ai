@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:ssh_ai_terminal/presentation/features/ai_chat/ai_message_markup.dart';
 import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/ai_markdown_body.dart';
 import 'package:ssh_ai_terminal/core/theme/app_theme_extension.dart';
 import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/aurora_border_glow.dart';
@@ -13,6 +14,7 @@ class ChatBubble extends StatelessWidget {
     this.isComplete = true,
     this.timestamp,
     this.onRunCode,
+    this.showThinkingByDefault = false,
   });
 
   final String content;
@@ -21,6 +23,7 @@ class ChatBubble extends StatelessWidget {
   final bool isComplete;
   final DateTime? timestamp;
   final void Function(String)? onRunCode; // 接收一键执行回调
+  final bool showThinkingByDefault;
 
   @override
   Widget build(BuildContext context) {
@@ -57,6 +60,8 @@ class ChatBubble extends StatelessWidget {
     final aiState = isError 
         ? AIBorderState.stuck 
         : (!isComplete ? AIBorderState.running : AIBorderState.idle);
+    final parsedSegments = parseAiMessageSegments(content);
+    final activityLabel = _buildActivityLabel(parsedSegments);
 
     final aiWidget = Container(
       width: double.infinity,
@@ -89,6 +94,8 @@ class ChatBubble extends StatelessWidget {
             content: content,
             isError: isError,
             onRunCode: onRunCode,
+            showThinkingByDefault: showThinkingByDefault,
+            segments: parsedSegments,
           ),
           
           if (!isComplete)
@@ -102,7 +109,13 @@ class ChatBubble extends StatelessWidget {
                     child: CircularProgressIndicator(strokeWidth: 2, color: auroraColor),
                   ),
                   const SizedBox(width: 8),
-                  Text('思考中...', style: TextStyle(fontSize: 12, color: auroraColor.withValues(alpha: 0.8))),
+                  Text(
+                    activityLabel,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: auroraColor.withValues(alpha: 0.8),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -120,7 +133,11 @@ class ChatBubble extends StatelessWidget {
                   const Spacer(),
                   // AI 消息底部的轻量级复制按钮
                   TextButton.icon(
-                    onPressed: () => copyChatText(context, content, successMessage: '已复制全文'),
+                    onPressed: () => copyChatText(
+                      context,
+                      extractAiAnswerText(content),
+                      successMessage: '已复制全文',
+                    ),
                     icon: Icon(Icons.content_copy, size: 12, color: colorScheme.onSurfaceVariant.withValues(alpha: 0.7)),
                     label: Text('复制', style: TextStyle(fontSize: 12, color: colorScheme.onSurfaceVariant.withValues(alpha: 0.7))),
                     style: TextButton.styleFrom(
@@ -156,5 +173,27 @@ class ChatBubble extends StatelessWidget {
 
   String _formatTime(DateTime time) {
     return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+  }
+
+  String _buildActivityLabel(List<AIMessageSegment> segments) {
+    final hasMarkdown = segments.any(
+      (segment) =>
+          segment.type == AIMessageSegmentType.markdown &&
+          segment.content.trim().isNotEmpty,
+    );
+    if (hasMarkdown) {
+      return '生成中...';
+    }
+
+    final hasThinking = segments.any(
+      (segment) =>
+          segment.type == AIMessageSegmentType.thinking &&
+          segment.content.trim().isNotEmpty,
+    );
+    if (hasThinking) {
+      return '思考中...';
+    }
+
+    return '生成中...';
   }
 }

@@ -1,25 +1,35 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ssh_ai_terminal/core/logging/app_logger.dart';
+import 'package:ssh_ai_terminal/data/models/ai_attachment_draft.dart';
 import 'package:ssh_ai_terminal/data/models/ai_chat_message.dart';
+import 'package:ssh_ai_terminal/data/models/ai_execution_profile.dart';
 import 'package:ssh_ai_terminal/data/models/ai_tool_config.dart';
 import 'package:ssh_ai_terminal/data/services/ai_cli/ai_cli_adapter.dart';
 import 'package:ssh_ai_terminal/data/services/ai_cli/tool_detectors/opencode_detector.dart';
 import 'package:ssh_ai_terminal/data/services/ai_cli/tool_detectors/openclaw_detector.dart';
+import 'package:ssh_ai_terminal/presentation/features/ai_chat/slash_command_utils.dart';
 import 'package:ssh_ai_terminal/presentation/features/ai_chat/tool_mode_utils.dart';
+import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/ai_control_sheet.dart';
+import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/ai_control_strip.dart';
+import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/ai_mcp_status_sheet.dart';
+import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/ai_model_selector_sheet.dart';
+import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/ai_plus_actions_sheet.dart';
 import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/ai_tool_selector.dart';
 import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/chat_bubble.dart';
 import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/chat_input_bar.dart';
 import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/conversation_history_drawer.dart';
-import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/streaming_text.dart';
 import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/tool_status_badge.dart';
 import 'package:ssh_ai_terminal/presentation/models/connection_status.dart';
 import 'package:ssh_ai_terminal/presentation/providers/ai_session_provider.dart';
 import 'package:ssh_ai_terminal/presentation/providers/connection_registry_provider.dart';
 import 'package:ssh_ai_terminal/presentation/providers/session_manager_provider.dart';
+import 'package:uuid/uuid.dart';
 
 /// AI 聊天主页面。
 ///
@@ -49,8 +59,10 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
 
   final ScrollController _scrollController = ScrollController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final Uuid _uuid = const Uuid();
   AIToolConfig? _activeToolConfig;
   Map<String, ToolDetectionResult>? _detectionResults;
+  List<AIAttachmentDraft> _draftAttachments = const <AIAttachmentDraft>[];
   bool _isDetecting = false;
   String? _lastAutoScrollSignature;
   bool _autoScrollScheduled = false;
@@ -107,6 +119,7 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
   void _applyRouteSelection() {
     _lastAutoScrollSignature = null;
     _isDetecting = false;
+    _draftAttachments = const <AIAttachmentDraft>[];
 
     final adapterId = widget.adapterId;
     if (adapterId == null) {
@@ -130,7 +143,11 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
       return;
     }
     final sessionKey = (serverId: widget.serverId, toolConfig: config);
-    ref.read(aiSessionProvider(sessionKey).notifier).loadOrCreateConversation();
+    final notifier = ref.read(aiSessionProvider(sessionKey).notifier);
+    unawaited(() async {
+      await notifier.loadOrCreateConversation();
+      await _refreshActiveControls();
+    }());
   }
 
   /// TOFU 主机指纹确认对话框。
@@ -298,7 +315,11 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
 
     // 加载或创建对话
     final sessionKey = (serverId: widget.serverId, toolConfig: config);
-    ref.read(aiSessionProvider(sessionKey).notifier).loadOrCreateConversation();
+    final notifier = ref.read(aiSessionProvider(sessionKey).notifier);
+    unawaited(() async {
+      await notifier.loadOrCreateConversation();
+      await _refreshActiveControls();
+    }());
   }
 
   AIToolConfig _createToolConfig(String adapterId, String mode) {
@@ -382,23 +403,74 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
     }
   }
 
-  void _handleSend(String text) {
-    if (_activeToolConfig == null) return;
+  bool _handleSend(String text) {
+    final activeToolConfig = _activeToolConfig;
+    if (activeToolConfig == null) {
+      return false;
+    }
 
     final registry = ref.read(connectionRegistryProvider.notifier);
     final client = registry.getClient(widget.serverId);
-    if (client == null) return;
+    if (client == null) {
+      return false;
+    }
 
     final sessionKey = (
       serverId: widget.serverId,
-      toolConfig: _activeToolConfig!,
+      toolConfig: activeToolConfig,
     );
-    ref.read(aiSessionProvider(sessionKey).notifier).sendQuery(
-          client: client,
-          prompt: text,
-        );
+    final sessionState = ref.read(aiSessionProvider(sessionKey));
+    final slashInvocation = activeToolConfig.adapterId == 'opencode'
+        ? parseSlashCommandInvocation(
+            text,
+            sessionState.controlCatalog.commandOptions,
+          )
+        : null;
+    if (sessionState.executionProfile.inputMode == AIInputMode.command &&
+        slashInvocation == null &&
+        (sessionState.executionProfile.commandName?.trim().isEmpty ?? true)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('命令模式需要先在控制面选择内部命令')),
+      );
+      return false;
+    }
+
+    final capabilities =
+        _resolveActiveDetectionResult()?.capabilities ?? AIToolCapabilities.none;
+    if (!_canSendDraftAttachments(
+      config: activeToolConfig,
+      sessionState: sessionState,
+      capabilities: capabilities,
+    )) {
+      return false;
+    }
+    final notifier = ref.read(aiSessionProvider(sessionKey).notifier);
+    if (slashInvocation != null) {
+      notifier.sendQuery(
+        client: client,
+        prompt: slashInvocation.arguments,
+        displayPrompt: slashInvocation.rawText,
+        executionProfileOverride: sessionState.executionProfile.copyWith(
+          inputMode: AIInputMode.command,
+          commandName: slashInvocation.commandName,
+        ),
+        attachments: _draftAttachments,
+      );
+    } else {
+      notifier.sendQuery(
+        client: client,
+        prompt: text,
+        attachments: _draftAttachments,
+      );
+    }
+    if (_draftAttachments.isNotEmpty) {
+      setState(() {
+        _draftAttachments = const <AIAttachmentDraft>[];
+      });
+    }
 
     _scrollToBottom();
+    return true;
   }
 
   void _handleInterrupt() {
@@ -437,7 +509,7 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
     Navigator.of(context).maybePop();
   }
 
-  Future<String?> _handleAttachLog() async {
+  Future<String?> _readTerminalLog() async {
     final activeSession =
         ref.read(sessionManagerProvider(widget.serverId)).activeSession;
     if (activeSession == null) return null;
@@ -460,6 +532,178 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
       AppLogger.error('Failed to read terminal buffer', error);
       return null;
     }
+  }
+
+  bool _canSendDraftAttachments({
+    required AIToolConfig config,
+    required AISessionState sessionState,
+    required AIToolCapabilities capabilities,
+  }) {
+    if (_draftAttachments.isEmpty) {
+      return true;
+    }
+
+    if (config.mode != 'http') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('当前链路不是 HTTP，附件暂时无法发送')),
+      );
+      return false;
+    }
+
+    if (sessionState.executionProfile.inputMode == AIInputMode.shell) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Shell 模式暂不支持图片或文件附件')),
+      );
+      return false;
+    }
+
+    final hasImage = _draftAttachments.any((attachment) => attachment.isImage);
+    final hasFile = _draftAttachments.any((attachment) => !attachment.isImage);
+
+    if (hasImage && !capabilities.supportsInputImages) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('当前 AI 链路不支持图片附件')),
+      );
+      return false;
+    }
+    if (hasFile && !capabilities.supportsInputFiles) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('当前 AI 链路不支持文件附件')),
+      );
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _pickDraftAttachments({
+    required bool imagesOnly,
+  }) async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      withData: true,
+      type: imagesOnly ? FileType.image : FileType.any,
+    );
+    if (!mounted || result == null) {
+      return;
+    }
+
+    final attachments = <AIAttachmentDraft>[];
+    for (final file in result.files) {
+      final bytes = file.bytes;
+      if (bytes == null || bytes.isEmpty) {
+        continue;
+      }
+      final filename = file.name.trim().isEmpty ? 'attachment' : file.name.trim();
+      final mimeType = _inferMimeType(
+        filename: filename,
+        extension: file.extension,
+        imageOnly: imagesOnly,
+      );
+      attachments.add(
+        AIAttachmentDraft(
+          id: _uuid.v4(),
+          type: imagesOnly ? AIAttachmentType.image : AIAttachmentType.file,
+          filename: filename,
+          mimeType: mimeType,
+          bytes: bytes,
+        ),
+      );
+    }
+
+    if (attachments.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('没有读取到可用的附件内容')),
+      );
+      return;
+    }
+
+    setState(() {
+      _draftAttachments = [..._draftAttachments, ...attachments];
+    });
+  }
+
+  Future<void> _attachTerminalLogDraft() async {
+    final log = await _readTerminalLog();
+    if (!mounted) {
+      return;
+    }
+    if (log == null || log.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('当前没有可附带的终端日志')),
+      );
+      return;
+    }
+
+    final filename =
+        'terminal-log-${DateTime.now().toIso8601String().replaceAll(':', '-')}.log';
+    setState(() {
+      _draftAttachments = [
+        ..._draftAttachments,
+        AIAttachmentDraft(
+          id: _uuid.v4(),
+          type: AIAttachmentType.terminalLog,
+          filename: filename,
+          mimeType: 'text/plain',
+          bytes: Uint8List.fromList(utf8.encode(log)),
+          previewText: log,
+        ),
+      ];
+    });
+  }
+
+  void _removeDraftAttachment(String attachmentId) {
+    setState(() {
+      _draftAttachments = _draftAttachments
+          .where((attachment) => attachment.id != attachmentId)
+          .toList(growable: false);
+    });
+  }
+
+  String _inferMimeType({
+    required String filename,
+    required String? extension,
+    required bool imageOnly,
+  }) {
+    final filenameParts = filename.split('.');
+    final fallbackExt = filenameParts.length > 1 ? filenameParts.last : '';
+    final ext = (extension ?? fallbackExt).trim().toLowerCase();
+    if (imageOnly) {
+      return switch (ext) {
+        'jpg' || 'jpeg' => 'image/jpeg',
+        'gif' => 'image/gif',
+        'webp' => 'image/webp',
+        'heic' => 'image/heic',
+        'heif' => 'image/heif',
+        _ => 'image/png',
+      };
+    }
+
+    return switch (ext) {
+      'txt' || 'log' || 'md' || 'yaml' || 'yml' => 'text/plain',
+      'json' => 'application/json',
+      'pdf' => 'application/pdf',
+      'png' => 'image/png',
+      'jpg' || 'jpeg' => 'image/jpeg',
+      'gif' => 'image/gif',
+      'webp' => 'image/webp',
+      'dart' ||
+      'ts' ||
+      'tsx' ||
+      'js' ||
+      'jsx' ||
+      'py' ||
+      'java' ||
+      'kt' ||
+      'swift' ||
+      'rs' ||
+      'go' ||
+      'sh' ||
+      'sql' ||
+      'css' ||
+      'html' =>
+        'text/plain',
+      _ => 'application/octet-stream',
+    };
   }
 
   void _scrollToBottom() {
@@ -537,6 +781,425 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
     );
   }
 
+  Future<void> _refreshActiveControls() async {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    final registry = ref.read(connectionRegistryProvider.notifier);
+    final client = registry.getClient(widget.serverId);
+    if (client == null) {
+      return;
+    }
+    final sessionKey = (serverId: widget.serverId, toolConfig: config);
+    await ref
+        .read(aiSessionProvider(sessionKey).notifier)
+        .refreshControlCatalog(client: client);
+  }
+
+  void _handleProfileChanged(AIExecutionProfile profile) {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    final sessionKey = (serverId: widget.serverId, toolConfig: config);
+    ref.read(aiSessionProvider(sessionKey).notifier).updateExecutionProfile(
+          profile,
+        );
+  }
+
+  void _handleProfileChangedAndRefresh(AIExecutionProfile profile) {
+    _handleProfileChanged(profile);
+    unawaited(_refreshActiveControls());
+  }
+
+  void _showModelSelector(AISessionState sessionState) {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    if (sessionState.controlCatalog.modelOptions.isEmpty) {
+      _showModelManagementSheet(sessionState);
+      return;
+    }
+    AIModelSelectorSheet.show(
+      context: context,
+      toolName: config.displayName,
+      adapterId: config.adapterId,
+      profile: sessionState.executionProfile,
+      catalog: sessionState.controlCatalog,
+      onApply: _handleProfileChangedAndRefresh,
+    );
+  }
+
+  void _showMcpStatusSheet(AISessionState sessionState) {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    AIMcpStatusSheet.show(
+      context: context,
+      toolName: config.displayName,
+      catalog: sessionState.controlCatalog,
+      isRefreshing: sessionState.isRefreshingControls,
+      onRefresh: () => unawaited(_refreshActiveControls()),
+      onConnect: _handleConnectMcp,
+      onDisconnect: _handleDisconnectMcp,
+    );
+  }
+
+  void _showPlusActions(AISessionState sessionState) {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    final capabilities =
+        _resolveActiveDetectionResult()?.capabilities ?? AIToolCapabilities.none;
+    AIPlusActionsSheet.show(
+      context: context,
+      toolName: config.displayName,
+      adapterId: config.adapterId,
+      capabilities: capabilities,
+      profile: sessionState.executionProfile,
+      canAttachTerminalLog: true,
+      onAttachImage: () => unawaited(_pickDraftAttachments(imagesOnly: true)),
+      onAttachFile: () => unawaited(_pickDraftAttachments(imagesOnly: false)),
+      onAttachTerminalLog: () => unawaited(_attachTerminalLogDraft()),
+      onManageModels: () => _showModelManagementSheet(sessionState),
+      onOpenMcpStatus: () => _showMcpStatusSheet(sessionState),
+      onSwitchInputMode: (mode) {
+        _handleProfileChanged(
+          sessionState.executionProfile.copyWith(inputMode: mode),
+        );
+      },
+      onShareSession: _handleShareSession,
+      onUnshareSession: _handleUnshareSession,
+      onSummarizeSession: _handleSummarizeSession,
+      onOpenAdvanced: () => _showControlSheet(sessionState),
+    );
+  }
+
+  void _showModelManagementSheet(AISessionState sessionState) {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder: (context) {
+        final providerOptions = sessionState.controlCatalog.providerOptions;
+        var selectedProviderId =
+            sessionState.executionProfile.providerId ??
+                (providerOptions.isEmpty ? null : providerOptions.first.id);
+
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final currentProviderLabel = providerOptions.isEmpty
+                ? null
+                : providerOptions.firstWhere(
+                    (option) => option.id == selectedProviderId,
+                    orElse: () => providerOptions.first,
+                  ).label;
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      config.adapterId == 'opencode'
+                          ? '${config.displayName} Provider 配置'
+                          : '${config.displayName} 模型管理',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      config.adapterId == 'opencode'
+                          ? '这里负责 OpenCode 已配置 Provider 的登录、刷新和排查。聊天页和高级设置里的模型切换，只会读取这些已配置项。'
+                          : 'OpenClaw 的模型认证和模型目录还没完全图形化。这里先保留独立入口和刷新说明，避免继续塞回一个总控制面。',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    if (currentProviderLabel != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        '当前 Provider：$currentProviderLabel',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ],
+                    if (providerOptions.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      ...providerOptions.map((option) {
+                        final isSelected = selectedProviderId == option.id;
+                        return ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(option.label),
+                          subtitle: option.description == null
+                              ? null
+                              : Text(option.description!),
+                          trailing: isSelected
+                              ? Icon(
+                                  Icons.check_circle,
+                                  color: Theme.of(context).colorScheme.primary,
+                                )
+                              : const Icon(Icons.radio_button_unchecked),
+                          onTap: () {
+                            setModalState(() {
+                              selectedProviderId = option.id;
+                            });
+                          },
+                        );
+                      }),
+                    ] else if (config.adapterId == 'opencode') ...[
+                      const SizedBox(height: 12),
+                      const Text('当前还没有已配置 Provider，请先在 OpenCode 服务端完成登录。'),
+                    ],
+                    const SizedBox(height: 16),
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 10,
+                      children: [
+                        FilledButton(
+                          onPressed: providerOptions.isEmpty || selectedProviderId == null
+                              ? null
+                              : () {
+                                  _handleProfileChangedAndRefresh(
+                                    sessionState.executionProfile.copyWith(
+                                      providerId: selectedProviderId,
+                                      modelSelectionExplicit: false,
+                                      clearModelId: true,
+                                      clearModelRef: true,
+                                      clearVariant: true,
+                                    ),
+                                  );
+                                  Navigator.of(context).pop();
+                                },
+                          child: const Text('设为默认 Provider'),
+                        ),
+                        OutlinedButton(
+                          onPressed: () {
+                            Navigator.of(context).pop();
+                            unawaited(_refreshActiveControls());
+                          },
+                          child: const Text('刷新已添加模型'),
+                        ),
+                      ],
+                    ),
+                    if (config.adapterId == 'opencode') ...[
+                      const SizedBox(height: 14),
+                      const Text('远端命令提示：`opencode providers login --provider <name>`'),
+                    ] else ...[
+                      const SizedBox(height: 14),
+                      const Text('远端命令提示：`openclaw models auth login` / `openclaw models set <model>`'),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _showControlSheet(AISessionState sessionState) {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    final activeDetectionResult = _resolveActiveDetectionResult();
+    final capabilities =
+        activeDetectionResult?.capabilities ?? AIToolCapabilities.none;
+    AIControlSheet.show(
+      context: context,
+      toolName: config.displayName,
+      adapterId: config.adapterId,
+      capabilities: capabilities,
+      profile: sessionState.executionProfile,
+      catalog: sessionState.controlCatalog,
+      isRefreshing: sessionState.isRefreshingControls,
+      onProfileChanged: _handleProfileChanged,
+      onRefresh: () => unawaited(_refreshActiveControls()),
+      onConnectMcp: (serverName) => _handleConnectMcp(serverName),
+      onDisconnectMcp: (serverName) => _handleDisconnectMcp(serverName),
+      onReplyPermission: (requestId, reply) =>
+          _handleReplyPermission(requestId, reply),
+      onShareSession: _handleShareSession,
+      onUnshareSession: _handleUnshareSession,
+      onSummarizeSession: _handleSummarizeSession,
+      onManageModels: () => _showModelManagementSheet(sessionState),
+    );
+  }
+
+  void _handleConnectMcp(String serverName) {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    final registry = ref.read(connectionRegistryProvider.notifier);
+    final client = registry.getClient(widget.serverId);
+    if (client == null) {
+      return;
+    }
+    final sessionKey = (serverId: widget.serverId, toolConfig: config);
+    unawaited(
+      ref.read(aiSessionProvider(sessionKey).notifier).connectMcpServer(
+            client: client,
+            serverName: serverName,
+          ),
+    );
+  }
+
+  void _handleDisconnectMcp(String serverName) {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    final registry = ref.read(connectionRegistryProvider.notifier);
+    final client = registry.getClient(widget.serverId);
+    if (client == null) {
+      return;
+    }
+    final sessionKey = (serverId: widget.serverId, toolConfig: config);
+    unawaited(
+      ref.read(aiSessionProvider(sessionKey).notifier).disconnectMcpServer(
+            client: client,
+            serverName: serverName,
+          ),
+    );
+  }
+
+  void _handleReplyPermission(String requestId, String reply) {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    final registry = ref.read(connectionRegistryProvider.notifier);
+    final client = registry.getClient(widget.serverId);
+    if (client == null) {
+      return;
+    }
+    final sessionKey = (serverId: widget.serverId, toolConfig: config);
+    unawaited(
+      ref.read(aiSessionProvider(sessionKey).notifier).replyPermission(
+            client: client,
+            requestId: requestId,
+            reply: reply,
+          ),
+    );
+  }
+
+  void _handleShareSession() {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    final registry = ref.read(connectionRegistryProvider.notifier);
+    final client = registry.getClient(widget.serverId);
+    if (client == null) {
+      return;
+    }
+    final sessionKey = (serverId: widget.serverId, toolConfig: config);
+    unawaited(() async {
+      try {
+        final url = await ref
+            .read(aiSessionProvider(sessionKey).notifier)
+            .shareSession(client: client);
+        if (!mounted) {
+          return;
+        }
+        if (url != null && url.isNotEmpty) {
+          await Clipboard.setData(ClipboardData(text: url));
+          if (!mounted) {
+            return;
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('分享链接已复制')),
+          );
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('会话已分享')),
+        );
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('分享失败: $error')),
+        );
+      }
+    }());
+  }
+
+  void _handleUnshareSession() {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    final registry = ref.read(connectionRegistryProvider.notifier);
+    final client = registry.getClient(widget.serverId);
+    if (client == null) {
+      return;
+    }
+    final sessionKey = (serverId: widget.serverId, toolConfig: config);
+    unawaited(() async {
+      try {
+        await ref
+            .read(aiSessionProvider(sessionKey).notifier)
+            .unshareSession(client: client);
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已取消分享')),
+        );
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('取消分享失败: $error')),
+        );
+      }
+    }());
+  }
+
+  void _handleSummarizeSession() {
+    final config = _activeToolConfig;
+    if (config == null) {
+      return;
+    }
+    final registry = ref.read(connectionRegistryProvider.notifier);
+    final client = registry.getClient(widget.serverId);
+    if (client == null) {
+      return;
+    }
+    final sessionKey = (serverId: widget.serverId, toolConfig: config);
+    unawaited(() async {
+      try {
+        await ref
+            .read(aiSessionProvider(sessionKey).notifier)
+            .summarizeSession(client: client);
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已提交会话总结任务')),
+        );
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('会话总结失败: $error')),
+        );
+      }
+    }());
+  }
+
   /// 切换到指定对话。
   void _switchConversation(String conversationId) {
     if (_activeToolConfig == null) return;
@@ -544,9 +1207,11 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
       serverId: widget.serverId,
       toolConfig: _activeToolConfig!,
     );
-    ref
-        .read(aiSessionProvider(sessionKey).notifier)
-        .loadConversation(conversationId);
+    final notifier = ref.read(aiSessionProvider(sessionKey).notifier);
+    unawaited(() async {
+      await notifier.loadConversation(conversationId);
+      await _refreshActiveControls();
+    }());
   }
 
   /// 删除指定对话。
@@ -605,9 +1270,12 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
                   serverId: widget.serverId,
                   toolConfig: _activeToolConfig!,
                 );
-                ref
-                    .read(aiSessionProvider(sessionKey).notifier)
-                    .createNewConversation();
+                final notifier =
+                    ref.read(aiSessionProvider(sessionKey).notifier);
+                unawaited(() async {
+                  await notifier.createNewConversation();
+                  await _refreshActiveControls();
+                }());
               },
               onDelete: _deleteConversation,
             )
@@ -651,10 +1319,21 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
                   serverId: widget.serverId,
                   toolConfig: _activeToolConfig!,
                 );
-                ref
-                    .read(aiSessionProvider(sessionKey).notifier)
-                    .createNewConversation();
+                final notifier =
+                    ref.read(aiSessionProvider(sessionKey).notifier);
+                unawaited(() async {
+                  await notifier.createNewConversation();
+                  await _refreshActiveControls();
+                }());
               },
+            ),
+          if (_activeToolConfig != null)
+            IconButton(
+              icon: const Icon(Icons.tune),
+              tooltip: '控制面',
+              onPressed: sessionState == null
+                  ? null
+                  : () => _showControlSheet(sessionState!),
             ),
         ],
       ),
@@ -673,20 +1352,64 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
               isWarning: connection.status != ConnectionStatus.connected,
             ),
           if ((sessionState?.runtimeStatus ?? '').isNotEmpty)
+            () {
+              final presentation = _buildRuntimeStatusPresentation(
+                sessionState!.runtimeStatus!,
+              );
+              return _buildStatusBanner(
+                icon: presentation.icon,
+                text: sessionState.runtimeStatus!,
+                isWarning: presentation.isWarning,
+              );
+            }(),
+          if (_activeToolConfig != null &&
+              activeDetectionResult != null &&
+              buildToolCapabilitySummary(activeDetectionResult).isNotEmpty)
             _buildStatusBanner(
-              icon: Icons.insights_outlined,
-              text: sessionState!.runtimeStatus!,
+              icon: Icons.tune,
+              text:
+                  '${_activeToolConfig!.displayName} · ${buildToolCapabilitySummary(activeDetectionResult)}',
+            ),
+          if ((sessionState?.controlError ?? '').isNotEmpty)
+            _buildStatusBanner(
+              icon: Icons.warning_amber_outlined,
+              text: sessionState!.controlError!,
+              isWarning: true,
             ),
           Expanded(
             child: _buildMessageList(sessionState),
           ),
-          if (sessionState?.isQuerying == true &&
-              sessionState!.streamingContent.isNotEmpty)
-            _buildStreamingBubble(sessionState.streamingContent),
+          if (sessionState != null)
+            AIControlStrip(
+              toolName: _activeToolConfig!.displayName,
+              adapterId: _activeToolConfig!.adapterId,
+              capabilities:
+                  activeDetectionResult?.capabilities ?? AIToolCapabilities.none,
+              profile: sessionState.executionProfile,
+              catalog: sessionState.controlCatalog,
+              onOpenControls: () => _showControlSheet(sessionState!),
+              onOpenModelSelector: () => _showModelSelector(sessionState!),
+              onOpenMcpStatus: () => _showMcpStatusSheet(sessionState!),
+              onAutoAcceptPermissionsChanged: (value) {
+                _handleProfileChanged(
+                  sessionState!.executionProfile.copyWith(
+                    autoAcceptPermissions: value,
+                  ),
+                );
+              },
+            ),
           ChatInputBar(
             onSend: _handleSend,
             onInterrupt: _handleInterrupt,
-            onAttachLog: _handleAttachLog,
+            attachments: _draftAttachments,
+            slashCommands: _activeToolConfig?.adapterId == 'opencode'
+                ? (sessionState?.controlCatalog.commandOptions ??
+                    const <AIControlOption>[])
+                : const <AIControlOption>[],
+            onOpenPlusActions: sessionState == null
+                ? null
+                : () => _showPlusActions(sessionState!),
+            onRemoveAttachment: _removeDraftAttachment,
             isQuerying: sessionState?.isQuerying ?? false,
             isConnected: isConnected && _activeToolConfig != null,
             hintText: _activeToolConfig != null
@@ -717,8 +1440,14 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
 
   Widget _buildMessageList(AISessionState? sessionState) {
     final messages = sessionState?.messages ?? [];
+    final showStreamingBubble =
+        sessionState?.isQuerying == true &&
+        (sessionState?.streamingContent.isNotEmpty ?? false);
 
-    if (messages.isEmpty && _activeToolConfig != null && !_isDetecting) {
+    if (messages.isEmpty &&
+        !showStreamingBubble &&
+        _activeToolConfig != null &&
+        !_isDetecting) {
       return _buildEmptyState();
     }
 
@@ -733,8 +1462,16 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
     return ListView.builder(
       controller: _scrollController,
       padding: const EdgeInsets.symmetric(vertical: 8),
-      itemCount: messages.length,
+      itemCount: messages.length + (showStreamingBubble ? 1 : 0),
       itemBuilder: (context, index) {
+        if (showStreamingBubble && index == messages.length) {
+          return _buildStreamingBubble(
+            sessionState!.streamingContent,
+            showThinkingByDefault:
+                sessionState.executionProfile.showThinkingByDefault,
+          );
+        }
+
         final message = messages[index];
         return ChatBubble(
           content: message.content,
@@ -743,35 +1480,24 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
           isComplete: message.isComplete,
           timestamp: message.timestamp,
           onRunCode: _handleRunCode,
+          showThinkingByDefault:
+              sessionState?.executionProfile.showThinkingByDefault ?? false,
         );
       },
     );
   }
 
-  Widget _buildStreamingBubble(String content) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.85,
-        ),
-        margin: const EdgeInsets.only(left: 8, right: 48, bottom: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: colorScheme.surface,
-          border: Border.all(
-            color: colorScheme.outlineVariant.withAlpha(160),
-          ),
-          borderRadius: const BorderRadius.only(
-            topLeft: Radius.circular(16),
-            topRight: Radius.circular(16),
-            bottomLeft: Radius.circular(4),
-            bottomRight: Radius.circular(16),
-          ),
-        ),
-        child: StreamingText(content: content),
+  Widget _buildStreamingBubble(
+    String content, {
+    required bool showThinkingByDefault,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 8),
+      child: ChatBubble(
+        content: content,
+        isUser: false,
+        isComplete: false,
+        showThinkingByDefault: showThinkingByDefault,
       ),
     );
   }
@@ -816,6 +1542,31 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  _StatusBannerPresentation _buildRuntimeStatusPresentation(String status) {
+    if (status.contains('已中断')) {
+      return const _StatusBannerPresentation(
+        icon: Icons.pause_circle_outline,
+        isWarning: true,
+      );
+    }
+    if (status.contains('失败') || status.contains('错误')) {
+      return const _StatusBannerPresentation(
+        icon: Icons.error_outline,
+        isWarning: true,
+      );
+    }
+    if (status.contains('回退')) {
+      return const _StatusBannerPresentation(
+        icon: Icons.alt_route,
+        isWarning: true,
+      );
+    }
+    return const _StatusBannerPresentation(
+      icon: Icons.insights_outlined,
+      isWarning: false,
     );
   }
 
@@ -944,4 +1695,14 @@ class _AIChatScreenState extends ConsumerState<AIChatScreen> {
       ),
     );
   }
+}
+
+class _StatusBannerPresentation {
+  const _StatusBannerPresentation({
+    required this.icon,
+    required this.isWarning,
+  });
+
+  final IconData icon;
+  final bool isWarning;
 }

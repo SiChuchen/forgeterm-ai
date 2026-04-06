@@ -138,6 +138,31 @@ class AIConversationRepository {
     }
   }
 
+  Future<void> replaceMessages(
+    String conversationId,
+    List<AIChatMessage> messages,
+  ) async {
+    try {
+      final existingKeys = _messageBox.values
+          .where((message) => message.conversationId == conversationId)
+          .map((message) => message.id)
+          .toList(growable: false);
+
+      for (final key in existingKeys) {
+        await _messageBox.delete(key);
+      }
+
+      for (final message in messages) {
+        await _messageBox.put(message.id, message);
+      }
+    } catch (error) {
+      throw AppException(
+        code: ErrorCode.storageWriteFailed,
+        originalError: error,
+      );
+    }
+  }
+
   Future<void> updateMessage(AIChatMessage message) async {
     try {
       await _messageBox.put(message.id, message);

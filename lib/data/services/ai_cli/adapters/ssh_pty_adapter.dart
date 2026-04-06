@@ -4,8 +4,15 @@ import 'dart:convert';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:ssh_ai_terminal/core/logging/app_logger.dart';
+import 'package:ssh_ai_terminal/data/models/ai_attachment_draft.dart';
 import 'package:ssh_ai_terminal/data/models/ai_chat_message.dart';
+import 'package:ssh_ai_terminal/data/models/ai_execution_profile.dart';
 import 'package:ssh_ai_terminal/data/services/ai_cli/ai_cli_adapter.dart';
+
+enum SshPtyJsonOutputMode {
+  ndjson,
+  singleObject,
+}
 
 /// SSH PTY 模式适配器（降级/兼容模式）。
 ///
@@ -22,6 +29,7 @@ class SshPtyAdapter extends AICLIAdapter {
     required this.adapterIcon,
     required this.commandTemplate,
     this.useJsonFormat = false,
+    this.jsonOutputMode = SshPtyJsonOutputMode.ndjson,
   });
 
   final String adapterId;
@@ -34,6 +42,7 @@ class SshPtyAdapter extends AICLIAdapter {
   /// 是否使用 JSON 格式解析输出（用于 opencode --format json）。
   /// 开启后，每行 JSON 被解析，提取 `part.text` 字段作为响应内容。
   final bool useJsonFormat;
+  final SshPtyJsonOutputMode jsonOutputMode;
 
   SSHSession? _currentShell;
   StreamSubscription<String>? _outputSub;
@@ -58,6 +67,8 @@ class SshPtyAdapter extends AICLIAdapter {
     required SSHClient client,
     required String prompt,
     String? sessionContext,
+    AIExecutionProfile executionProfile = AIExecutionProfile.empty,
+    List<AIAttachmentDraft> attachments = const <AIAttachmentDraft>[],
   }) async* {
     _interrupted = false;
 
@@ -92,6 +103,12 @@ class SshPtyAdapter extends AICLIAdapter {
 
           // 跳过命令回显（发送命令后首批输出可能包含命令本身）
           if (!commandSent) return;
+
+          if (useJsonFormat &&
+              jsonOutputMode == SshPtyJsonOutputMode.singleObject) {
+            buffer.write(chunk);
+            return;
+          }
 
           flushTimer?.cancel();
           buffer.write(chunk);
@@ -168,7 +185,11 @@ class SshPtyAdapter extends AICLIAdapter {
           buffer.clear();
 
           if (useJsonFormat) {
-            _processJsonLines(rawText, controller);
+            if (jsonOutputMode == SshPtyJsonOutputMode.singleObject) {
+              _processJsonObject(rawText, controller);
+            } else {
+              _processJsonLines(rawText, controller);
+            }
           } else {
             final text = _filterShellNoise(_stripAnsiCodes(rawText));
             if (text.isNotEmpty) {
@@ -295,7 +316,11 @@ class SshPtyAdapter extends AICLIAdapter {
       buffer.clear();
 
       if (useJsonFormat) {
-        _processJsonLines(rawText, controller);
+        if (jsonOutputMode == SshPtyJsonOutputMode.singleObject) {
+          _processJsonObject(rawText, controller);
+        } else {
+          _processJsonLines(rawText, controller);
+        }
       } else {
         final text = _filterShellNoise(_stripAnsiCodes(rawText));
         if (text.isNotEmpty) {
@@ -375,6 +400,83 @@ class SshPtyAdapter extends AICLIAdapter {
           ));
         }
       }
+    }
+  }
+
+  void _processJsonObject(
+    String rawText,
+    StreamController<AIResponseChunk> controller,
+  ) {
+    final extracted = _extractSingleJsonContent(rawText);
+    if (extracted == null || extracted.trim().isEmpty) {
+      final stripped = _filterShellNoise(_stripAnsiCodes(rawText));
+      if (stripped.isEmpty) {
+        return;
+      }
+      controller.add(AIResponseChunk(
+        type: AIChunkType.text,
+        content: stripped,
+      ));
+      return;
+    }
+
+    controller.add(AIResponseChunk(
+      type: AIChunkType.text,
+      content: extracted,
+    ));
+  }
+
+  @visibleForTesting
+  static String? extractSingleJsonContentForTest(String rawText) {
+    return _extractSingleJsonContent(rawText);
+  }
+
+  static String? _extractSingleJsonContent(String rawText) {
+    final cleaned = _stripAnsiCodes(rawText);
+    final firstBrace = cleaned.indexOf('{');
+    final lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace < 0 || lastBrace <= firstBrace) {
+      return null;
+    }
+
+    final jsonCandidate = cleaned.substring(firstBrace, lastBrace + 1);
+    try {
+      final decoded = jsonDecode(jsonCandidate);
+      if (decoded is! Map) {
+        return null;
+      }
+
+      final normalized = Map<String, dynamic>.from(
+        decoded.cast<dynamic, dynamic>(),
+      );
+      final payloads = normalized['payloads'];
+      if (payloads is List) {
+        final texts = payloads
+            .whereType<Map>()
+            .map((payload) => payload['text'])
+            .whereType<String>()
+            .map((text) => text.trim())
+            .where((text) => text.isNotEmpty)
+            .toList(growable: false);
+        if (texts.isNotEmpty) {
+          return texts.join('\n\n');
+        }
+      }
+
+      final result = normalized['result'];
+      if (result is String && result.trim().isNotEmpty) {
+        return result.trim();
+      }
+
+      final text = normalized['text'];
+      if (text is String && text.trim().isNotEmpty) {
+        return text.trim();
+      }
+
+      return const JsonEncoder.withIndent('  ').convert(decoded);
+    } catch (error) {
+      AppLogger.warning('SshPtyAdapter: 单对象 JSON 解析失败', error);
+      return null;
     }
   }
 

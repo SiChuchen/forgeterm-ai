@@ -108,6 +108,7 @@ dart run tool/verify.dart build-apk
 - [docs/数据库设计.md](./docs/数据库设计.md)
 - [docs/API接口设计.md](./docs/API接口设计.md)
 - [docs/数据流图.md](./docs/数据流图.md)
+- [docs/上线检查清单.md](./docs/上线检查清单.md)
 
 ---
 

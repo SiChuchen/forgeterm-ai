@@ -15,8 +15,8 @@
 | 接口类型 | 传输 | 认证 | 当前用途 |
 |----------|------|------|----------|
 | SSH | TCP / SSH | 密码或私钥 | 建连、开 Shell、执行命令、建立端口转发 |
-| OpenCode HTTP | 本地 loopback + SSH tunnel | Basic Auth | 创建会话、发送消息、中断 |
-| OpenClaw HTTP | 本地 loopback + SSH tunnel | Bearer Token | 流式 `/v1/chat/completions` |
+| OpenCode HTTP | 本地 loopback + SSH tunnel | Basic Auth | 创建会话、发送消息、拉取历史、中断 |
+| OpenClaw HTTP | 本地 loopback + SSH tunnel | Bearer Token | 优先 `/v1/responses`，回退 `/v1/chat/completions` |
 
 ---
 
@@ -103,6 +103,7 @@ await client.forwardLocal(remoteHost, remotePort)
 | `GET` | `/session` | 健康检查 / 认证校验 |
 | `POST` | `/session` | 创建会话 |
 | `POST` | `/session/{id}/message` | 发送消息 |
+| `GET` | `/session/{id}/message` | 拉取远端消息历史 |
 | `POST` | `/session/{id}/abort` | 中断 |
 
 ### 3.3 创建会话
@@ -146,6 +147,7 @@ Authorization: Basic base64(opencode:<password>)
 说明:
 
 - 当前适配器消费的是完整响应，不是 SSE。
+- 查询成功后，应用会进一步拉取 `GET /session/{id}/message`，用远端 transcript 回灌本地消息列表。
 - 如果 HTTP 不可用，运行时会降级到 PTY 模式，而不是继续重试自建 API。
 
 ---
@@ -157,6 +159,7 @@ Authorization: Basic base64(opencode:<password>)
 - 默认远端端口: `18789`
 - 启动命令:
   - 开启配置: `openclaw config set gateway.http.endpoints.chatCompletions.enabled true --strict-json`
+  - 开启配置: `openclaw config set gateway.http.endpoints.responses.enabled true --strict-json`
   - 启动 gateway: `openclaw gateway --allow-unconfigured --auth password --bind loopback --port 18789 --force`
 - 认证方式:
   - `Authorization: Bearer <OPENCLAW_GATEWAY_PASSWORD>`
@@ -166,7 +169,8 @@ Authorization: Basic base64(opencode:<password>)
 | 方法 | 路径 | 用途 |
 |------|------|------|
 | `GET` | `/healthz` | 存活探测 |
-| `POST` | `/v1/chat/completions` | 流式对话 |
+| `POST` | `/v1/responses` | 首选结构化流式对话 |
+| `POST` | `/v1/chat/completions` | 兼容回退流式对话 |
 
 ### 4.3 请求头
 
@@ -178,7 +182,28 @@ x-openclaw-agent-id: main
 x-openclaw-session-key: <session-key>
 ```
 
-### 4.4 请求体
+### 4.4 `responses` 请求体
+
+```json
+{
+  "model": "openclaw:main",
+  "stream": true,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "列出当前服务器上的 Docker 容器"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### 4.5 `chat completions` 回退请求体
 
 ```json
 {
@@ -193,13 +218,13 @@ x-openclaw-session-key: <session-key>
 }
 ```
 
-### 4.5 响应语义
+### 4.6 响应语义
 
-- 首选 SSE 流。
+- 首选 `responses` SSE 流，并消费结构化 `text / thinking / toolUse / error` 块。
 - 若网关返回 JSON，则适配器按非流式 JSON 兼容处理。
-- 对运行时来说，`200` 或 `400` 都可用于判断 `chatCompletions` 端点已就绪。
+- 对运行时来说，`200` 或 `400` 都可用于判断 `responses` / `chatCompletions` 端点已就绪。
 
-### 4.6 降级策略
+### 4.7 降级策略
 
 - `http` 失败 -> `execute`
 - `execute` 失败 -> `pty`
@@ -218,6 +243,7 @@ class ToolDetectionResult {
   final String? version;
   final List<String> supportedModes;
   final String? preferredMode;
+  final AIToolCapabilities capabilities;
 }
 ```
 
@@ -235,7 +261,8 @@ class AIToolConfig {
 
 ### 5.3 会话持久化
 
-- `AIConversation.sessionContext` 用于保存远端 session key 或 session id。
+- `AIConversation.sessionContext` 仍保存字符串，但当前新值为版本化 JSON 字符串。
+- 对 OpenClaw / OpenCode 而言，其中会记录 `sessionKey` 或 `remoteSessionId` 等字段。
 - `AIChatMessage.isComplete` 用于标识中断消息或未完成流式消息。
 
 ---

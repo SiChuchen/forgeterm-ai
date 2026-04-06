@@ -6,10 +6,10 @@ void main() {
     await tester.pumpWidget(
       const MaterialApp(
         home: Scaffold(
-          body: Center(child: Text('ForgeTerm AI')),
+          body: Center(child: Text('SSH AI Terminal')),
         ),
       ),
     );
-    expect(find.text('ForgeTerm AI'), findsOneWidget);
+    expect(find.text('SSH AI Terminal'), findsOneWidget);
   });
 }

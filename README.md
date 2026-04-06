@@ -30,6 +30,9 @@ ForgeTerm AI lets you connect to remote servers from your phone, keep multiple s
 - Reconnect automatically after transient disconnects
 - Configure local and remote port forwarding
 - Detect and use OpenCode / OpenClaw on remote servers
+- Prefer OpenClaw Responses API when available, with automatic fallback to chat completions / CLI / PTY
+- Sync OpenCode HTTP sessions back from the remote transcript after a successful request
+- Reveal AI thinking blocks on demand when the upstream tool emits structured `thinking` output
 - Persist servers, keys, conversations, quick commands, and theme preferences locally
 
 ---
@@ -43,7 +46,7 @@ Implemented:
 - SSH connection management
 - Multi-session terminal flow
 - Port forwarding
-- OpenCode / OpenClaw integration
+- OpenCode / OpenClaw integration with HTTP-first fallback chains
 - Local persistence with Hive + secure storage
 - Android foreground service integration
 
@@ -87,7 +90,8 @@ dart run tool/verify.dart build-apk
 2. Connect and open a shell session.
 3. Start additional sessions if needed.
 4. Open the AI assistant and let the app detect available remote tools.
-5. Use port forwarding when a remote HTTP tool endpoint is needed.
+5. When HTTP mode is available, the app auto-starts the remote service, creates a tunnel, and reuses remote session context.
+6. OpenCode HTTP sessions are synced back from remote message history after each successful request.
 
 ---
 
@@ -109,6 +113,7 @@ If you want implementation details, start here:
 - [docs/数据库设计.md](./docs/数据库设计.md)
 - [docs/API接口设计.md](./docs/API接口设计.md)
 - [docs/数据流图.md](./docs/数据流图.md)
+- [docs/上线检查清单.md](./docs/上线检查清单.md)
 
 ---
 

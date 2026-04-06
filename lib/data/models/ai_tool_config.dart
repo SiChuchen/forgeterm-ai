@@ -76,6 +76,67 @@ class AIToolConfig {
       autoDetect: autoDetect ?? this.autoDetect,
     );
   }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    return other is AIToolConfig &&
+        other.id == id &&
+        other.serverId == serverId &&
+        other.adapterId == adapterId &&
+        other.displayName == displayName &&
+        other.command == command &&
+        other.mode == mode &&
+        other.httpPort == httpPort &&
+        _mapEquals(other.envVars, envVars) &&
+        other.autoDetect == autoDetect;
+  }
+
+  @override
+  int get hashCode {
+    return Object.hash(
+      id,
+      serverId,
+      adapterId,
+      displayName,
+      command,
+      mode,
+      httpPort,
+      _mapHash(envVars),
+      autoDetect,
+    );
+  }
+
+  static bool _mapEquals(
+    Map<String, String>? left,
+    Map<String, String>? right,
+  ) {
+    if (identical(left, right)) {
+      return true;
+    }
+    if (left == null || right == null || left.length != right.length) {
+      return false;
+    }
+    for (final entry in left.entries) {
+      if (right[entry.key] != entry.value) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static int _mapHash(Map<String, String>? value) {
+    if (value == null || value.isEmpty) {
+      return 0;
+    }
+    final entries = value.entries.toList(growable: false)
+      ..sort((a, b) => a.key.compareTo(b.key));
+    return Object.hashAll(
+      entries.map((entry) => Object.hash(entry.key, entry.value)),
+    );
+  }
 }
 
 /// `AIToolConfig` 的手写 Hive 适配器。

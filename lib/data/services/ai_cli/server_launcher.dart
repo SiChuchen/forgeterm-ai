@@ -27,6 +27,7 @@ class OpenClawGatewayStatus {
   const OpenClawGatewayStatus({
     required this.isRunning,
     required this.endpointEnabled,
+    this.responsesEnabled = false,
     this.password,
     this.startedByApp = false,
   });
@@ -34,11 +35,13 @@ class OpenClawGatewayStatus {
   const OpenClawGatewayStatus.unavailable()
       : isRunning = false,
         endpointEnabled = false,
+        responsesEnabled = false,
         password = null,
         startedByApp = false;
 
   final bool isRunning;
   final bool endpointEnabled;
+  final bool responsesEnabled;
   final String? password;
   final bool startedByApp;
 }
@@ -293,8 +296,8 @@ done
 ///
 /// 职责：
 /// - 检测远端 gateway 是否在线
-/// - 检查 `/v1/chat/completions` 端点是否可用
-/// - 必要时自动开启 chat completions 端点并重启 gateway
+/// - 检查 `/v1/chat/completions` 与 `/v1/responses` 端点是否可用
+/// - 必要时自动开启 HTTP 端点并重启 gateway
 /// - 从远端环境或进程环境中读取共享密码
 /// - 将密码缓存到本地安全存储，便于同一服务器复用
 class OpenClawGatewayLauncher {
@@ -320,10 +323,12 @@ class OpenClawGatewayLauncher {
         client,
         password: cachedPassword,
       );
-      if (cachedStatus.isRunning && cachedStatus.endpointEnabled) {
+      if (cachedStatus.isRunning &&
+          (cachedStatus.endpointEnabled || cachedStatus.responsesEnabled)) {
         return OpenClawGatewayStatus(
           isRunning: true,
-          endpointEnabled: true,
+          endpointEnabled: cachedStatus.endpointEnabled,
+          responsesEnabled: cachedStatus.responsesEnabled,
           password: cachedPassword,
         );
       }
@@ -335,11 +340,13 @@ class OpenClawGatewayLauncher {
         client,
         password: remotePassword,
       );
-      if (remoteStatus.isRunning && remoteStatus.endpointEnabled) {
+      if (remoteStatus.isRunning &&
+          (remoteStatus.endpointEnabled || remoteStatus.responsesEnabled)) {
         await _writeCachedPassword(remotePassword);
         return OpenClawGatewayStatus(
           isRunning: true,
-          endpointEnabled: true,
+          endpointEnabled: remoteStatus.endpointEnabled,
+          responsesEnabled: remoteStatus.responsesEnabled,
           password: remotePassword,
         );
       }
@@ -365,7 +372,7 @@ class OpenClawGatewayLauncher {
 
     final startedStatus = await _startGateway(client);
     if (startedStatus.isRunning &&
-        startedStatus.endpointEnabled &&
+        (startedStatus.endpointEnabled || startedStatus.responsesEnabled) &&
         startedStatus.password != null) {
       await _writeCachedPassword(startedStatus.password!);
     } else if (!startedStatus.isRunning) {
@@ -386,16 +393,25 @@ class OpenClawGatewayLauncher {
     SSHClient client, {
     required String password,
   }) async {
-    final endpointStatusCode = await probeChatCompletionsStatusCode(
+    final chatStatusCode = await probeChatCompletionsStatusCode(
       client,
       password: password,
       remoteHost: remoteHost,
       remotePort: remotePort,
     );
-    if (_isEndpointReadyStatus(endpointStatusCode)) {
+    final responsesStatusCode = await probeResponsesStatusCode(
+      client,
+      password: password,
+      remoteHost: remoteHost,
+      remotePort: remotePort,
+    );
+    final chatEnabled = _isEndpointReadyStatus(chatStatusCode);
+    final responsesEnabled = _isEndpointReadyStatus(responsesStatusCode);
+    if (chatEnabled || responsesEnabled) {
       return OpenClawGatewayStatus(
         isRunning: true,
-        endpointEnabled: true,
+        endpointEnabled: chatEnabled,
+        responsesEnabled: responsesEnabled,
         password: password,
       );
     }
@@ -409,6 +425,7 @@ class OpenClawGatewayLauncher {
       return OpenClawGatewayStatus(
         isRunning: true,
         endpointEnabled: false,
+        responsesEnabled: false,
         password: password,
       );
     }
@@ -422,11 +439,14 @@ class OpenClawGatewayLauncher {
       '''
 env PATH="\$HOME/.npm-global/bin:\$PATH" openclaw config set \\
   gateway.http.endpoints.chatCompletions.enabled true --strict-json >/dev/null
+
+env PATH="\$HOME/.npm-global/bin:\$PATH" openclaw config set \\
+  gateway.http.endpoints.responses.enabled true --strict-json >/dev/null
 ''',
     );
     if ((enableResult.exitCode ?? 1) != 0) {
       AppLogger.warning(
-        'OpenClawGatewayLauncher: 启用 chat completions 端点失败',
+        'OpenClawGatewayLauncher: 启用 HTTP 端点失败',
         'exit=${enableResult.exitCode}, stderr=${enableResult.stderr.trim()}',
       );
     }
@@ -455,12 +475,9 @@ nohup env PATH="\$HOME/.npm-global/bin:\$PATH" OPENCLAW_GATEWAY_PASSWORD="\$pass
 
 for i in 1 2 3 4 5 6 7 8; do
   sleep 1
-  code=\$(curl -sS -o /dev/null -w '%{http_code}' -X POST \\
-    -H "Authorization: Bearer \$password" \\
-    -H 'Content-Type: application/json' \\
-    -d '{}' \\
-    http://$remoteHost:$remotePort/v1/chat/completions 2>/dev/null || true)
-  if [ "\$code" = "200" ] || [ "\$code" = "400" ]; then
+  code=\$(curl -sS -o /dev/null -w '%{http_code}' \\
+    http://$remoteHost:$remotePort/healthz 2>/dev/null || true)
+  if [ "\$code" = "200" ]; then
     printf '%s' "\$password"
     exit 0
   fi
@@ -472,10 +489,12 @@ exit 1
 
     final password = startResult.stdout.trim();
     if ((startResult.exitCode ?? 1) == 0 && password.isNotEmpty) {
+      final status = await _probeGateway(client, password: password);
       AppLogger.info('OpenClawGatewayLauncher: 已自动启动远端 OpenClaw Gateway');
       return OpenClawGatewayStatus(
-        isRunning: true,
-        endpointEnabled: true,
+        isRunning: status.isRunning,
+        endpointEnabled: status.endpointEnabled,
+        responsesEnabled: status.responsesEnabled,
         password: password,
         startedByApp: true,
       );
@@ -564,6 +583,23 @@ done
       "-H 'Content-Type: application/json' "
       "-d '{}' "
       "http://$remoteHost:$remotePort/v1/chat/completions 2>/dev/null || true",
+    );
+    return int.tryParse(result.stdout.trim());
+  }
+
+  static Future<int?> probeResponsesStatusCode(
+    SSHClient client, {
+    required String password,
+    String remoteHost = '127.0.0.1',
+    int remotePort = 18789,
+  }) async {
+    final result = await runRemoteCommand(
+      client,
+      "curl -sS -o /dev/null -w '%{http_code}' -X POST "
+      "-H ${shellQuote('Authorization: Bearer $password')} "
+      "-H 'Content-Type: application/json' "
+      "-d '{}' "
+      "http://$remoteHost:$remotePort/v1/responses 2>/dev/null || true",
     );
     return int.tryParse(result.stdout.trim());
   }

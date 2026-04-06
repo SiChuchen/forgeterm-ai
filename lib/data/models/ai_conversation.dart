@@ -37,7 +37,10 @@ class AIConversation {
   @HiveField(5)
   final DateTime updatedAt;
 
-  /// 远端 AI 会话上下文（如 OpenClaw session ID）。
+  /// 远端 AI 会话上下文。
+  ///
+  /// 当前仍以字符串落盘，但新值会保存为版本化 JSON 字符串，
+  /// 兼容旧数据中的原始 session id / session key。
   @HiveField(6)
   final String? sessionContext;
 

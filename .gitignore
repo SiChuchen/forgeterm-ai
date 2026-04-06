@@ -47,6 +47,8 @@ build_and_install_log.txt
 /fix*.dart
 /patch*.dart
 /patch*.py
+/.codex_*
+/tool/.codex_*
 
 # 本地专用 / 内部资料
 /.claude/

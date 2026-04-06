@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:ssh_ai_terminal/presentation/features/ai_chat/ai_message_markup.dart';
 import 'package:ssh_ai_terminal/presentation/features/ai_chat/widgets/ai_markdown_body.dart';
 
 /// 流式文本渲染组件。
@@ -66,7 +67,7 @@ class _StreamingTextState extends State<StreamingText>
             child: TextButton.icon(
               onPressed: () => copyChatText(
                 context,
-                widget.content,
+                extractAiAnswerText(widget.content),
                 successMessage: '消息已复制',
               ),
               icon: const Icon(Icons.content_copy, size: 14),

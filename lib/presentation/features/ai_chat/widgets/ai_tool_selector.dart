@@ -43,13 +43,13 @@ class AIToolSelector extends StatelessWidget {
   }) {
     return showModalBottomSheet(
         context: context,
-        builder: (context) => AIToolSelector(
-          selectedAdapterId: selectedAdapterId,
-          selectedMode: selectedMode,
-          detectionResults: detectionResults,
-          isDetecting: isDetecting,
-          onSelected: (id, mode) {
-            onSelected(id, mode);
+      builder: (context) => AIToolSelector(
+        selectedAdapterId: selectedAdapterId,
+        selectedMode: selectedMode,
+        detectionResults: detectionResults,
+        isDetecting: isDetecting,
+        onSelected: (id, mode) {
+          onSelected(id, mode);
           Navigator.of(context).pop();
         },
       ),
@@ -80,15 +80,21 @@ class AIToolSelector extends StatelessWidget {
                 tool.mode == selectedMode;
             final hasDetectionResult = tool.detectionResult != null;
             final isAvailable = tool.isInstalled || isSelected;
-            final subtitle = !hasDetectionResult
+            final baseSubtitle = !hasDetectionResult
                 ? (isSelected
                     ? '当前会话'
                     : (isDetecting ? '检测中...' : '未检测'))
                 : (tool.isInstalled
                     ? buildToolModeStrategyText(tool.detectionResult)
                     : (isSelected ? '当前会话' : '未安装'));
+            final capabilitySummary =
+                buildToolCapabilitySummary(tool.detectionResult);
+            final subtitle = tool.isInstalled && capabilitySummary.isNotEmpty
+                ? '$baseSubtitle\n$capabilitySummary'
+                : baseSubtitle;
 
             return ListTile(
+              isThreeLine: tool.isInstalled && capabilitySummary.isNotEmpty,
               leading: Icon(
                 tool.icon,
                 color: isAvailable

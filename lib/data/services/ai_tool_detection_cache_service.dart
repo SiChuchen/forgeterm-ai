@@ -116,11 +116,19 @@ class AIToolDetectionCacheService {
               ?.map((item) => item.toString())
               .toList(growable: false) ??
           const <String>[];
+      final capabilitiesRaw = map['capabilities'];
       results[adapterId] = ToolDetectionResult(
         isInstalled: map['isInstalled'] == true,
         version: map['version']?.toString(),
         supportedModes: supportedModes,
         preferredMode: map['preferredMode']?.toString(),
+        capabilities: capabilitiesRaw is Map
+            ? AIToolCapabilities.fromJson(
+                Map<String, dynamic>.from(
+                  capabilitiesRaw.cast<dynamic, dynamic>(),
+                ),
+              )
+            : AIToolCapabilities.none,
       );
     }
     return results;
@@ -135,6 +143,7 @@ class AIToolDetectionCacheService {
         'version': result.version,
         'supportedModes': result.supportedModes,
         'preferredMode': result.preferredMode,
+        'capabilities': result.capabilities.toJson(),
       });
     });
   }

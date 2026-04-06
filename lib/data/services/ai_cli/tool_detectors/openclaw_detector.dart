@@ -18,6 +18,28 @@ class OpenClawDetector {
   static const String adapterId = 'openclaw';
   static const String displayName = 'OpenClaw';
   static const IconData icon = Icons.smart_toy;
+  static const AIToolCapabilities _responsesCapabilities = AIToolCapabilities(
+    supportsResponsesApi: true,
+    supportsStreaming: true,
+    supportsSessionRouting: true,
+    supportsInputFiles: true,
+    supportsInputImages: true,
+    supportsToolUse: true,
+    supportsUsage: true,
+    supportsModelSelection: true,
+    supportsAgentSelection: true,
+    supportsCommandMode: true,
+  );
+  static const AIToolCapabilities _chatCompletionsCapabilities =
+      AIToolCapabilities(
+    supportsChatCompletionsApi: true,
+    supportsStreaming: true,
+    supportsSessionRouting: true,
+    supportsModelSelection: true,
+    supportsAgentSelection: true,
+    supportsCommandMode: true,
+  );
+  static const AIToolCapabilities _fallbackCapabilities = AIToolCapabilities();
 
   /// 检测 OpenClaw 是否已安装。
   static Future<ToolDetectionResult> detect(
@@ -46,11 +68,15 @@ class OpenClawDetector {
         allowStart: autoStart,
       );
 
-      if (gatewayStatus.isRunning && gatewayStatus.endpointEnabled) {
-        return const ToolDetectionResult(
+      if (gatewayStatus.isRunning &&
+          (gatewayStatus.responsesEnabled || gatewayStatus.endpointEnabled)) {
+        return ToolDetectionResult(
           isInstalled: true,
           supportedModes: ['http', 'execute', 'pty'],
           preferredMode: 'http',
+          capabilities: gatewayStatus.responsesEnabled
+              ? _responsesCapabilities
+              : _chatCompletionsCapabilities,
         );
       }
 
@@ -59,6 +85,7 @@ class OpenClawDetector {
         isInstalled: true,
         supportedModes: ['execute', 'pty'],
         preferredMode: 'execute',
+        capabilities: _fallbackCapabilities,
       );
     } catch (error) {
       AppLogger.error('OpenClawDetector: 检测失败', error);
@@ -87,6 +114,7 @@ class OpenClawDetector {
       commandTemplate:
           'openclaw agent --local --agent main --message "{prompt}"{session_args} --json',
       useJsonFormat: true,
+      jsonOutputMode: SshPtyJsonOutputMode.singleObject,
     );
   }
 

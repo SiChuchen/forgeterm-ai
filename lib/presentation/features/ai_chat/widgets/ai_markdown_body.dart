@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -5,6 +7,46 @@ import 'package:markdown/markdown.dart' as md;
 import 'package:flutter_highlighter/flutter_highlighter.dart';
 import 'package:flutter_highlighter/themes/atom-one-dark.dart';
 import 'package:flutter_highlighter/themes/atom-one-light.dart';
+import 'package:ssh_ai_terminal/presentation/features/ai_chat/ai_message_markup.dart';
+
+const Set<String> _safeMarkdownRootTags = <String>{
+  'p',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'li',
+  'blockquote',
+  'pre',
+  'ol',
+  'ul',
+  'hr',
+  'table',
+  'thead',
+  'tbody',
+  'tr',
+  'section',
+};
+
+bool _canRenderMarkdownSafely(String markdown) {
+  try {
+    final document = md.Document(
+      extensionSet: md.ExtensionSet.gitHubFlavored,
+      encodeHtml: false,
+    );
+    final nodes = document.parseLines(const LineSplitter().convert(markdown));
+    return nodes.every((node) {
+      if (node is! md.Element) {
+        return false;
+      }
+      return _safeMarkdownRootTags.contains(node.tag);
+    });
+  } catch (_) {
+    return false;
+  }
+}
 
 /// 魔法代码块渲染引擎
 class AIMessageMarkdown extends StatelessWidget {
@@ -14,20 +56,71 @@ class AIMessageMarkdown extends StatelessWidget {
     this.isError = false,
     this.style,
     this.onRunCode,
+    this.showThinkingByDefault = false,
+    this.segments,
   });
 
   final String content;
   final bool isError;
   final TextStyle? style;
   final void Function(String)? onRunCode; // 核心：一键运行代码回调
+  final bool showThinkingByDefault;
+  final List<AIMessageSegment>? segments;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final textColor = colorScheme.onSurface;
-    
+
+    final effectiveSegments = segments ?? parseAiMessageSegments(content);
+    if (effectiveSegments.isEmpty) {
+      return _buildMarkdownBody(context, content, textColor);
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: effectiveSegments.map((segment) {
+        switch (segment.type) {
+          case AIMessageSegmentType.markdown:
+            return _buildMarkdownBody(context, segment.content, textColor);
+          case AIMessageSegmentType.thinking:
+            return _ThinkingDisclosure(
+              content: segment.content,
+              style: style,
+              initialExpanded: showThinkingByDefault,
+            );
+        }
+      }).toList(growable: false),
+    );
+  }
+
+  Widget _buildMarkdownBody(
+    BuildContext context,
+    String markdown,
+    Color textColor,
+  ) {
+    final trimmed = markdown.trim();
+    if (trimmed.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final colorScheme = Theme.of(context).colorScheme;
+    final paragraphStyle = style ??
+        TextStyle(
+          color: textColor,
+          fontSize: 15,
+          height: 1.6,
+        );
+
+    if (!_canRenderMarkdownSafely(markdown)) {
+      return SelectableText(
+        markdown.trimRight(),
+        style: paragraphStyle,
+      );
+    }
+
     return MarkdownBody(
-      data: content,
+      data: markdown,
       selectable: true,
       shrinkWrap: true,
       builders: {
@@ -38,17 +131,26 @@ class AIMessageMarkdown extends StatelessWidget {
       },
       styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
         blockSpacing: 12,
-        p: style ?? TextStyle(
+        p: paragraphStyle,
+        h1: TextStyle(
           color: textColor,
-          fontSize: 15,
-          height: 1.6,
+          fontSize: 20,
+          fontWeight: FontWeight.bold,
         ),
-        h1: TextStyle(color: textColor, fontSize: 20, fontWeight: FontWeight.bold),
-        h2: TextStyle(color: textColor, fontSize: 18, fontWeight: FontWeight.bold),
-        h3: TextStyle(color: textColor, fontSize: 16, fontWeight: FontWeight.bold),
+        h2: TextStyle(
+          color: textColor,
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
+        ),
+        h3: TextStyle(
+          color: textColor,
+          fontSize: 16,
+          fontWeight: FontWeight.bold,
+        ),
         code: TextStyle(
           fontFamily: 'JetBrainsMono',
-          backgroundColor: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+          backgroundColor:
+              colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
           color: colorScheme.primary,
           fontSize: 13.5,
         ),
@@ -59,8 +161,120 @@ class AIMessageMarkdown extends StatelessWidget {
           fontStyle: FontStyle.italic,
         ),
         blockquoteDecoration: BoxDecoration(
-          border: Border(left: BorderSide(color: colorScheme.primary, width: 4)),
+          border: Border(
+            left: BorderSide(color: colorScheme.primary, width: 4),
+          ),
         ),
+      ),
+    );
+  }
+}
+
+class _ThinkingDisclosure extends StatefulWidget {
+  const _ThinkingDisclosure({
+    required this.content,
+    this.style,
+    this.initialExpanded = false,
+  });
+
+  final String content;
+  final TextStyle? style;
+  final bool initialExpanded;
+
+  @override
+  State<_ThinkingDisclosure> createState() => _ThinkingDisclosureState();
+}
+
+class _ThinkingDisclosureState extends State<_ThinkingDisclosure> {
+  late bool _expanded;
+
+  @override
+  void initState() {
+    super.initState();
+    _expanded = widget.initialExpanded;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final paragraphStyle = widget.style ??
+        TextStyle(
+          color: colorScheme.onSurfaceVariant,
+          fontSize: 14,
+          height: 1.6,
+        );
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 10),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: colorScheme.outlineVariant.withValues(alpha: 0.5),
+        ),
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.psychology_alt_outlined,
+                    size: 16,
+                    color: colorScheme.secondary,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '模型思考',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: colorScheme.onSurface,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    _expanded ? '收起' : '查看',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 18,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: _canRenderMarkdownSafely(widget.content)
+                  ? MarkdownBody(
+                      data: widget.content,
+                      selectable: true,
+                      shrinkWrap: true,
+                      styleSheet:
+                          MarkdownStyleSheet.fromTheme(Theme.of(context))
+                              .copyWith(
+                        p: paragraphStyle,
+                      ),
+                    )
+                  : SelectableText(
+                      widget.content.trimRight(),
+                      style: paragraphStyle,
+                    ),
+            ),
+        ],
       ),
     );
   }

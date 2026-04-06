@@ -45,9 +45,10 @@ class SSHService {
     required Future<bool> Function(String fingerprint, String algorithm)
     onVerifyHostKey,
   }) async {
+    final normalizedPassword = _normalizePassword(password);
     _validateCredentials(
       authType: config.authType,
-      password: password,
+      password: normalizedPassword,
       privateKey: privateKey,
     );
 
@@ -60,7 +61,7 @@ class SSHService {
 
       return await _connectWithSocket(
         config: config,
-        password: password,
+        password: normalizedPassword,
         privateKey: privateKey,
         passphrase: passphrase,
         socket: socket,
@@ -69,6 +70,7 @@ class SSHService {
     } catch (error) {
       throw _mapConnectError(
         error,
+        authType: config.authType,
         hostKeyFailureReason: null,
         hostKeyVerificationException: null,
       );
@@ -229,9 +231,10 @@ class SSHService {
     required Future<bool> Function(String fingerprint, String algorithm)
     onVerifyHostKey,
   }) async {
+    final normalizedPassword = _normalizePassword(password);
     _validateCredentials(
       authType: config.authType,
-      password: password,
+      password: normalizedPassword,
       privateKey: privateKey,
     );
 
@@ -248,7 +251,7 @@ class SSHService {
         keepAliveInterval: const Duration(seconds: AppLimits.keepAliveInterval),
         identities: identities,
         onPasswordRequest: config.authType == AuthType.password
-            ? () => password
+            ? () => normalizedPassword
             : null,
         onVerifyHostKey: (algorithm, fingerprintBytes) async {
           final fingerprint = _formatFingerprint(fingerprintBytes);
@@ -310,6 +313,7 @@ class SSHService {
       client?.close();
       throw _mapConnectError(
         error,
+        authType: config.authType,
         hostKeyFailureReason: hostKeyFailureReason,
         hostKeyVerificationException: hostKeyVerificationException,
       );
@@ -370,6 +374,7 @@ class SSHService {
 
   AppException _mapConnectError(
     Object error, {
+    required AuthType authType,
     required _HostKeyFailureReason? hostKeyFailureReason,
     required AppException? hostKeyVerificationException,
   }) {
@@ -398,7 +403,13 @@ class SSHService {
       return _mapSocketError(error);
     }
     if (error is SSHAuthError) {
-      return AppException(code: ErrorCode.authFailed, originalError: error);
+      return AppException(
+        code: ErrorCode.authFailed,
+        message: authType == AuthType.password
+            ? '密码认证失败，请检查已保存密码是否正确'
+            : '私钥认证失败，请检查私钥或密码短语是否正确',
+        originalError: error,
+      );
     }
     if (error is SSHHostkeyError) {
       return AppException(
@@ -417,6 +428,13 @@ class SSHService {
     }
 
     return AppException(code: ErrorCode.unknown, originalError: error);
+  }
+
+  String? _normalizePassword(String? password) {
+    if (password == null) {
+      return null;
+    }
+    return password.replaceAll('\r', '').replaceAll('\n', '');
   }
 
   AppException _mapShellError(Object error) {

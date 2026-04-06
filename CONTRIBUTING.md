@@ -53,6 +53,7 @@
   - `docs/架构设计.md`
   - `docs/数据库设计.md`
   - `docs/API接口设计.md`
+  - `docs/上线检查清单.md`
 
 ---
 

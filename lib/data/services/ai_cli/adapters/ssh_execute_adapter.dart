@@ -4,7 +4,9 @@ import 'dart:convert';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:ssh_ai_terminal/core/logging/app_logger.dart';
+import 'package:ssh_ai_terminal/data/models/ai_attachment_draft.dart';
 import 'package:ssh_ai_terminal/data/models/ai_chat_message.dart';
+import 'package:ssh_ai_terminal/data/models/ai_execution_profile.dart';
 import 'package:ssh_ai_terminal/data/services/ai_cli/ai_cli_adapter.dart';
 
 /// SSH Execute 模式适配器。
@@ -58,6 +60,8 @@ class SshExecuteAdapter extends AICLIAdapter {
     required SSHClient client,
     required String prompt,
     String? sessionContext,
+    AIExecutionProfile executionProfile = AIExecutionProfile.empty,
+    List<AIAttachmentDraft> attachments = const <AIAttachmentDraft>[],
   }) async* {
     _interrupted = false;
 
